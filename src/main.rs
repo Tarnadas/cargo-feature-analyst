@@ -1,7 +1,8 @@
 use cargo::core::package::PackageSet;
 use cargo::core::registry::PackageRegistry;
-use cargo::core::resolver::Method;
+use cargo::core::resolver::ResolveOpts;
 use cargo::core::shell::Shell;
+use cargo::core::InternedString;
 use cargo::core::{Package, PackageId, Resolve, Workspace};
 use cargo::ops;
 use cargo::util::{important_paths, CargoResult};
@@ -9,7 +10,6 @@ use cargo::Config;
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::fmt;
 use structopt::StructOpt;
-
 
 #[derive(StructOpt)]
 #[structopt(bin_name = "cargo")]
@@ -57,14 +57,15 @@ fn main() {
         args.all_features,
         args.no_default_features,
         args.no_dev_dependencies,
-    ).unwrap();
+    )
+    .unwrap();
 
     let ids = packages.package_ids().collect::<Vec<_>>();
     let packages = registry.get(&ids).unwrap();
 
     let mut enabled_features_map: BTreeMap<Feature, Vec<String>> = BTreeMap::new();
     let mut disabled_features: BTreeSet<Feature> = BTreeSet::new();
-    
+
     build_graph(
         &resolve,
         &packages,
@@ -98,25 +99,31 @@ fn resolve<'a, 'cfg>(
     no_default_features: bool,
     no_dev_dependencies: bool,
 ) -> CargoResult<(PackageSet<'a>, Resolve)> {
-    let features = Method::split_features(&features.into_iter().collect::<Vec<_>>());
+    let features = features
+        .map(|feature| {
+            feature
+                .split(",")
+                .map(|f| f.to_string())
+                .collect::<Vec<String>>()
+        })
+        .unwrap_or_default();
 
     let (packages, resolve) = ops::resolve_ws(workspace)?;
 
-    let method = Method::Required {
-        dev_deps: !no_dev_dependencies,
-        features: &features,
+    let resolve_opts = ResolveOpts::new(
+        !no_dev_dependencies,
+        &features,
         all_features,
-        uses_default_features: !no_default_features,
-    };
+        !no_default_features,
+    );
 
     let resolve = ops::resolve_with_previous(
         registry,
         workspace,
-        method,
+        &resolve_opts,
         Some(&resolve),
         None,
         &[],
-        true,
         true,
     )?;
     Ok((packages, resolve))
@@ -126,7 +133,7 @@ fn resolve<'a, 'cfg>(
 struct Feature {
     parent_crate: String,
     version: String,
-    name: String,
+    name: InternedString,
 }
 
 impl fmt::Display for Feature {
@@ -148,14 +155,14 @@ fn build_graph<'a>(
         if !traversed_pkg.insert(pkg_id) {
             continue;
         }
-        for raw_dep_id in resolve.deps_not_replaced(pkg_id) {
+        for (raw_dep_id, _) in resolve.deps_not_replaced(pkg_id) {
             let dep_id = match resolve.replacement(raw_dep_id) {
                 Some(id) => id,
                 None => raw_dep_id,
             };
             pending.push(dep_id);
             for feature_name in resolve.features(dep_id).iter() {
-                let feature = Feature{
+                let feature = Feature {
                     parent_crate: dep_id.name().to_string(),
                     version: dep_id.version().to_string(),
                     name: feature_name.clone(),
@@ -164,10 +171,10 @@ fn build_graph<'a>(
                 enabling_crates.push(pkg_id.name().to_string())
             }
             for (feature_name, _) in packages.get_one(dep_id).unwrap().summary().features() {
-                let feature = Feature{
+                let feature = Feature {
                     parent_crate: dep_id.name().to_string(),
                     version: dep_id.version().to_string(),
-                    name: feature_name.to_string(),
+                    name: feature_name.clone(),
                 };
                 match enabled_features_map.get(&feature) {
                     None => disabled_features.insert(feature),
@@ -177,7 +184,6 @@ fn build_graph<'a>(
         }
     }
 }
-
 
 fn print_seperator() {
     for _ in 1..20 {
